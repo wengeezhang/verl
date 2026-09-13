@@ -168,7 +168,7 @@ def test_modelopt_mxfp8_methods_are_patched_and_survive_a_refit():
             # Initial load: the wrapped hook records the checkpoint layout before the kernel
             # rewrites weight_scale into its inference layout.
             layer.quant_method.process_weights_after_loading(layer)
-            assert getattr(layer, "_verl_fp8_pristine")["weight_scale"] == ((4, 2), torch.uint8)
+            assert layer._verl_fp8_pristine["weight_scale"] == ((4, 2), torch.uint8)
             assert tuple(layer.weight_scale.shape) == (8,)
             live_ptr = layer.weight_scale.data_ptr()
 
