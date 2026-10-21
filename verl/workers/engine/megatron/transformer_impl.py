@@ -1189,7 +1189,18 @@ class MegatronEngineWithLMHead(MegatronEngine):
 
         # logits_processor_func return tensors with shape (1, total_nnz/cp_size)
         if distillation_use_topk:
-            ret.update(logits_processor_func(student_logits=logits_bak, data=batch, data_format=data_format))
+            from verl.models.mcore.util import get_thd_quant_align_size
+
+            # the teacher's top-k tensors are packed with the padding the model forward gave the student inputs
+            ret.update(
+                logits_processor_func(
+                    student_logits=logits_bak,
+                    data=batch,
+                    data_format=data_format,
+                    quant_align_size=get_thd_quant_align_size(self.tf_config),
+                    forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
+                )
+            )
         if not distillation_only:
             ret["log_probs"] = vocab_parallel_log_probs_from_logits(logits_bak, label)
 

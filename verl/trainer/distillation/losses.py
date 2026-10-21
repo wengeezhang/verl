@@ -128,8 +128,13 @@ def compute_topk_loss(
     data: TensorDict,
     student_logits: torch.Tensor,
     data_format: str,
+    quant_align_size: Optional[int] = None,
+    forced_max_seqlen: Optional[int] = None,
 ) -> torch.Tensor:
     """Compute the topk loss in logit processor.
+
+    ``quant_align_size`` and ``forced_max_seqlen`` are how the Megatron engine padded the student's inputs
+    (THD per-sequence alignment, BSHD padded length); the Megatron loss packs the teacher tensors with them.
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
@@ -155,6 +160,9 @@ def compute_topk_loss(
             }
         case _:
             raise NotImplementedError(f"Unsupported strategy: {config.strategy=}")
+    backend_kwargs = {}
+    if config.strategy == "megatron":
+        backend_kwargs = {"quant_align_size": quant_align_size, "forced_max_seqlen": forced_max_seqlen}
 
     if loss_mode not in loss_functions:
         raise NotImplementedError(f"Unsupported top-k distillation loss mode: {loss_mode}")
@@ -166,6 +174,7 @@ def compute_topk_loss(
         teacher_topk_ids=data["teacher_ids"],
         config=distillation_config,
         data_format=data_format,
+        **backend_kwargs,
     )
 
     expected_shape = student_logits.shape[:2]
@@ -183,6 +192,8 @@ def distillation_ppo_loss(
     dp_group=None,
     student_logits: torch.Tensor = None,
     data_format: str = "thd",
+    quant_align_size: Optional[int] = None,
+    forced_max_seqlen: Optional[int] = None,
 ):
     """Loss function used both for logit processor and final policy loss.
     - student_logits is not None, compute the topk loss in logit processor.
@@ -207,6 +218,8 @@ def distillation_ppo_loss(
           - teacher_ids: (bsz, seqlen, topk)
         student_logits: (bsz, seqlen/cp_size, vocab_size/tp_size).
         data_format: "thd" or "bshd", models not support THD format, e.g GPT-OSS, Qwen3.5
+        quant_align_size, forced_max_seqlen: the Megatron engine's padding of the student inputs, see
+            ``compute_topk_loss``.
 
     Returns:
     - student_logits is not None, return the topk loss tensor (bsz, seqlen/cp_size).
@@ -215,7 +228,9 @@ def distillation_ppo_loss(
 
     # Called as logits processor
     if student_logits is not None:
-        return compute_topk_loss(config, distillation_config, data, student_logits, data_format)
+        return compute_topk_loss(
+            config, distillation_config, data, student_logits, data_format, quant_align_size, forced_max_seqlen
+        )
 
     # Called as final policy loss
     distillation_loss_config = distillation_config.distillation_loss
