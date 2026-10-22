@@ -33,35 +33,43 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from verl.utils import tensordict_utils as tu
 from verl.workers.engine.megatron.transformer_impl import MegatronEngineWithLMHead
 
 _VOCAB_SIZE = 8
 _DISTILLATION_KEYS = ("distillation_losses", "student_mass", "teacher_mass")
 
 
-def _make_engine_stub():
+def _make_engine_stub(tf_config=None):
     eng = object.__new__(MegatronEngineWithLMHead)
     eng.engine_config = SimpleNamespace(
         entropy_from_logits_with_chunking=False,
         entropy_from_logits_chunk_size=1024,
     )
+    eng.tf_config = tf_config if tf_config is not None else SimpleNamespace(fp8=None)
     return eng
 
 
-def _make_logits_processor(keys):
-    def _proc(student_logits, data, data_format):
+def _make_logits_processor(keys, paddings=None):
+    def _proc(student_logits, data, data_format, quant_align_size=None, forced_max_seqlen=None):
+        if paddings is not None:
+            paddings.append((quant_align_size, forced_max_seqlen))
         n = student_logits.shape[1]
         return {k: torch.full((1, n), float(i + 1)) for i, k in enumerate(keys)}
 
     return _proc
 
 
-def _run_logits_processor(eng, *, distillation_use_topk, distillation_only):
+def _run_logits_processor(
+    eng, *, distillation_use_topk, distillation_only, logits_processor_func=None, forced_max_seqlen=None
+):
     total_nnz = 5 if distillation_use_topk else 4
     logits = torch.randn(1, total_nnz, _VOCAB_SIZE)
     label = torch.randint(0, _VOCAB_SIZE, (1, total_nnz))
     temperature = torch.ones(1, total_nnz)
     batch = TensorDict({}, batch_size=[])
+    if forced_max_seqlen is not None:
+        tu.assign_non_tensor(batch, forced_max_seqlen=forced_max_seqlen)
 
     with patch(
         "verl.workers.engine.megatron.transformer_impl.vocab_parallel_log_probs_from_logits",
@@ -75,7 +83,7 @@ def _run_logits_processor(eng, *, distillation_use_topk, distillation_only):
             calculate_entropy=False,
             distillation_use_topk=distillation_use_topk,
             distillation_only=distillation_only,
-            logits_processor_func=_make_logits_processor(_DISTILLATION_KEYS),
+            logits_processor_func=logits_processor_func or _make_logits_processor(_DISTILLATION_KEYS),
             batch=batch,
             data_format="thd",
         )
@@ -115,3 +123,25 @@ def test_megatron_logits_processor_without_topk_always_computes_log_probs():
     assert "log_probs" in ret
     for k in _DISTILLATION_KEYS:
         assert k not in ret
+
+
+@pytest.mark.parametrize(
+    "tf_config, expected",
+    [
+        (SimpleNamespace(fp8="e4m3", fp8_recipe="mxfp8"), 32),
+        (SimpleNamespace(fp8="hybrid", fp8_recipe="blockwise"), 16),
+        (SimpleNamespace(fp8=None, fp8_recipe="mxfp8"), None),
+    ],
+)
+def test_megatron_logits_processor_passes_the_student_padding_to_topk_loss(tf_config, expected):
+    """The top-k loss packs the teacher tensors itself, so it needs the padding of the student inputs."""
+    eng = _make_engine_stub(tf_config)
+    paddings = []
+    _run_logits_processor(
+        eng,
+        distillation_use_topk=True,
+        distillation_only=True,
+        logits_processor_func=_make_logits_processor(_DISTILLATION_KEYS, paddings),
+        forced_max_seqlen=48,  # the BSHD length pad_bshd_to_minibatch_max set on the micro-batch
+    )
+    assert paddings == [(expected, 48)]

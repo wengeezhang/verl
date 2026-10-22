@@ -329,6 +329,8 @@ def compute_forward_kl_topk(
     data_format: str,
     *,
     include_tail: bool = False,
+    quant_align_size: Optional[int] = None,
+    forced_max_seqlen: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
     """Compute truncated or tail-aware teacher-top-k KL with the Megatron backend.
 
@@ -342,6 +344,11 @@ def compute_forward_kl_topk(
             bucket, which turns the truncated objective into the exact forward KL
             between the two coarse-grained ``K + 1``-class distributions.
             Selected by ``loss_mode=forward_kl_topk_tail``.
+        quant_align_size: the alignment the model forward padded the student's packed inputs to for the
+            low-precision GEMMs (``verl.models.mcore.util.get_thd_quant_align_size``), so that the teacher
+            tensors are packed into the same rows as ``student_logits``.
+        forced_max_seqlen: the length the model forward padded the student's BSHD inputs to (the mini-batch
+            maximum, see ``pad_bshd_to_minibatch_max``), for the same reason.
 
     Returns:
     - distillation_losses: (bsz, seqlen/cp_size)
@@ -353,11 +360,20 @@ def compute_forward_kl_topk(
 
     # 1. split across cp groups (bsz, seqlen, topk) => (bsz, seqlen/cp_size, topk)
     if data_format == "thd":
-        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(teacher_topk_log_probs, pre_process=True)
-        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(teacher_topk_ids, pre_process=True)
+        teacher_topk_log_probs_cp_split, *_ = preprocess_thd_engine(
+            teacher_topk_log_probs, pre_process=True, quant_align_size=quant_align_size
+        )
+        teacher_topk_ids_cp_split, *_ = preprocess_thd_engine(
+            teacher_topk_ids, pre_process=True, quant_align_size=quant_align_size
+        )
     else:
-        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(teacher_topk_log_probs, pre_process=True)
-        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True)
+        # BSHD inputs are padded as one batch; preprocess_bshd_engine only needs to know that padding is on
+        use_fp8_padding = quant_align_size is not None
+        bshd_padding = dict(use_fp8_padding=use_fp8_padding, forced_max_seqlen=forced_max_seqlen)
+        teacher_topk_log_probs_cp_split, *_ = preprocess_bshd_engine(
+            teacher_topk_log_probs, pre_process=True, **bshd_padding
+        )
+        teacher_topk_ids_cp_split, *_ = preprocess_bshd_engine(teacher_topk_ids, pre_process=True, **bshd_padding)
     assert teacher_topk_log_probs_cp_split.shape[:2] == teacher_topk_ids_cp_split.shape[:2] == student_logits.shape[:2]
 
     # 2. compute token-wise KL divergence across tp groups
