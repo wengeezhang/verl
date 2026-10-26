@@ -193,7 +193,7 @@ class QuantizedRolloutSentinel:
             + "; ".join(problems)
             + ". Likely causes: a layer that must stay in high precision was quantized (lm_head, embeddings, MoE "
             "router - check ignored_layers), the engine's kernel scale layouts were not rebuilt after the weight "
-            "sync, or an unsupported GEMM backend was selected via engine_kwargs."
+            "sync (see the post-sync self-check), or an unsupported GEMM backend was selected via engine_kwargs."
         )
         if self.mode == "raise":
             raise RuntimeError(
