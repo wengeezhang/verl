@@ -55,9 +55,10 @@ verl defaults the MXFP8 dense and MoE kernels of vLLM and SGLang to DeepGEMM; fo
 | Check | Runs | Reports | Switch |
 |---|---|---|---|
 | Quantized-rollout sentinel | every training step | NaN log-probs, KL above 1.0, every response at the length cap | `VERL_QUANT_SENTINEL` |
+| Post-sync self-check | after every weight sync | kernel scale layouts that did not follow the sync | `VERL_MXFP8_REFIT_CHECK` |
 
-The switch takes `warn` (the default: log the finding and keep going), `raise` (stop the run) or `0` (off).
-The sentinel applies to every quantized rollout, FP8 and FP4 included.
+Each switch takes `warn` (the default: log the finding and keep going), `raise` (stop the run or the sync)
+or `0` (off). The sentinel applies to every quantized rollout, FP8 and FP4 included.
 
 ### Quantized-rollout sentinel
 
@@ -73,6 +74,43 @@ When the rollout is quantized, both trainers check each step's metrics:
 The rollout counts as quantized when `rollout.quantization` sets `linear`, `moe` or `config_file`, or the
 model's own `config.json` (local paths only) carries a `quantization_config`. The sentinel catches gross
 failures only: one layer type left unquantized (KL 0.007–0.010) stays within the healthy range.
+
+### Post-sync self-check
+
+After loading, both engines derive kernel-specific copies of the MXFP8 weights and scales (swizzled
+scales, shuffled or packed experts). If a sync skips that step, the kernel pairs fresh weights with stale
+scales while every shape and dtype still matches. After every sync, verl therefore runs the smallest MXFP8
+linear layer and one expert of the smallest MXFP8 MoE layer through their own kernels on a small random
+input and compares the output with a BF16 reference on the dequantized canonical weights. Healthy layers
+read a relative error of about 0.03 (dense) and 0.05 (experts); a stale layout reads O(1).
+
+- `VERL_MXFP8_REFIT_CHECK_TOL` (default 0.25) and `VERL_MXFP8_REFIT_CHECK_MOE_TOL` set the thresholds.
+- On SGLang, the refit loader also reports experts whose scales the sync did not write.
+- The expert probe is skipped, with a warning, where its made-up routing cannot send every row to one
+  expert at weight 1. On vLLM: expert or data parallelism, non-SiLU gates, and, on monolithic MoE kernels, a
+  routed scaling factor, grouped top-k, a score correction bias or custom routing. On SGLang: expert
+  parallelism, TP without `reduce_results`, and non-softmax, grouped, biased or custom routing.
+
+What it does not show:
+
+- It samples one dense layer and one expert per sync; a layer outside the sample can still be stale.
+- It runs the kernels eagerly. A re-derivation into new storage, instead of the storage a CUDA graph
+  captured, passes the probe while graph replays keep reading the old values. That the captured storage is
+  updated rests on indirect evidence (the re-derived layouts are copied back in place, and the KL stays in
+  its healthy range), not on a graph replay.
+
+### Configurations SGLang refuses
+
+Two configurations are refused before a weight sync writes anything:
+
+- MoE layers kept in BF16 (`rollout.quantization.ignore`) whose experts the MoE runner re-laid out at load:
+  SGLang's FlashInfer TRT-LLM runner stores BF16 experts in a block layout a weight sync cannot write, while
+  verl's default DeepGEMM runner keeps them in checkpoint layout.
+- The delta checkpoint engine with any quantized rollout (`rollout.quantization` or the checkpoint's own
+  `quantization_config`): it applies its payloads without the trainer-side weight quantization.
+
+Do not set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for an SGLang rollout: verl starts SGLang
+with `enable_memory_saver=True`, which refuses that allocator mode.
 
 ## Example: Qwen3-8B on GSM8K
 
