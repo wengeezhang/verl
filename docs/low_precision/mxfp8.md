@@ -50,6 +50,30 @@ Notes:
 verl defaults the MXFP8 dense and MoE kernels of vLLM and SGLang to DeepGEMM; for details, see
 [Low-Precision Rollout and Quantization-Aware Training](qat.md).
 
+## Checks
+
+| Check | Runs | Reports | Switch |
+|---|---|---|---|
+| Quantized-rollout sentinel | every training step | NaN log-probs, KL above 1.0, every response at the length cap | `VERL_QUANT_SENTINEL` |
+
+The switch takes `warn` (the default: log the finding and keep going), `raise` (stop the run) or `0` (off).
+The sentinel applies to every quantized rollout, FP8 and FP4 included.
+
+### Quantized-rollout sentinel
+
+When the rollout is quantized, both trainers check each step's metrics:
+
+- `training/rollout_probs_diff_mean` is non-finite while the batch had valid tokens;
+- `rollout_corr/kl` is non-finite or above `VERL_QUANT_SENTINEL_KL_MAX` (default 1.0; healthy quantized
+  rollouts read about 0.001–0.03);
+- every response hits the length cap (`response_length/clip_ratio` close to 1) on
+  `VERL_QUANT_SENTINEL_CLIP_STEPS` consecutive steps (default 2; `0` turns this rule off, and it is off
+  under `rollout.ignore_eos`, where every response runs to the cap by design).
+
+The rollout counts as quantized when `rollout.quantization` sets `linear`, `moe` or `config_file`, or the
+model's own `config.json` (local paths only) carries a `quantization_config`. The sentinel catches gross
+failures only: one layer type left unquantized (KL 0.007–0.010) stays within the healthy range.
+
 ## Example: Qwen3-8B on GSM8K
 
 [`examples/mxfp8/run_qwen3_8b_megatron.sh`](https://github.com/verl-project/verl/blob/main/examples/mxfp8/run_qwen3_8b_megatron.sh)
